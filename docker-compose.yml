@@ -1,0 +1,111 @@
+# ==============================================================================
+# docker-compose.yml for llama.cpp Xing4.0 (PR #29012)
+#
+# 使用方式:
+#   1. 下载模型文件到 ./models/ 目录
+#   2. 选择要使用的 profile（下方注释说明）
+#   3. docker compose up -d xing4-gpu
+#
+# Unraid 使用:
+#   在 Unraid 终端中:
+#   cd /mnt/cache/appdata/llama-xing4
+#   docker compose up -d xing4-gpu
+#
+# 可用 services:
+#   xing4-gpu    Xing4.0 + CUDA GPU（需要 NVIDIA GPU）
+#   xing4-cpu    Xing4.0 + CPU only（仅冒烟测试，29B MoE 很慢）
+#   mtp-gpu      内置 MTP 投机解码 + CUDA GPU
+#   baseline-gpu 无投机解码 + CUDA GPU（对比测试）
+# ==============================================================================
+
+# ---- 共享配置 ----
+x-common: &common
+  restart: unless-stopped
+  ports:
+    - "8080:8080"
+  volumes:
+    - ./models:/models:ro
+  shm_size: "4g"
+
+x-gpu: &gpu
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: all
+            capabilities: [gpu]
+
+# ---- 服务定义 ----
+services:
+  # ==========================================================================
+  # Xing4.0 + GPU (主力服务)
+  # ==========================================================================
+  xing4-gpu:
+    <<: *common
+    <<: *gpu
+    image: ghcr.io/${IMAGE_OWNER:-haol666}/llama-xing4:cuda
+    # 2080Ti 专用镜像改为 :cuda-75（体积更小）
+    container_name: llama-xing4
+    command: >
+      -m /models/${TARGET_MODEL:-Xing4.0-29B-A4B-1Q3M.gguf}
+      -c ${CTX_SIZE:-32768}
+      -ngl ${NGL:-99}
+      -fa on
+      -ctk q8_0 -ctv q8_0
+      --host 0.0.0.0 --port 8080
+    environment:
+      - LLAMA_ARG_HOST=0.0.0.0
+      - LLAMA_ARG_PORT=8080
+
+  # ==========================================================================
+  # Xing4.0 + CPU (仅冒烟测试)
+  # ==========================================================================
+  xing4-cpu:
+    <<: *common
+    image: ghcr.io/${IMAGE_OWNER:-haol666}/llama-xing4:cpu
+    container_name: llama-xing4-cpu
+    command: >
+      -m /models/${TARGET_MODEL:-Xing4.0-29B-A4B-1Q3M.gguf}
+      -c ${CTX_SIZE:-8192}
+      -ngl 0
+      -fa on
+      --host 0.0.0.0 --port 8080
+
+  # ==========================================================================
+  # 内置 MTP 投机解码 + GPU — 提速用
+  # ==========================================================================
+  mtp-gpu:
+    <<: *common
+    <<: *gpu
+    image: ghcr.io/${IMAGE_OWNER:-haol666}/llama-xing4:cuda
+    container_name: llama-xing4-mtp
+    command: >
+      -m /models/${TARGET_MODEL:-Xing4.0-29B-A4B-1Q3M.gguf}
+      --spec-type draft-mtp
+      --spec-draft-n-max ${SPEC_N_MAX:-4}
+      -c ${CTX_SIZE:-32768}
+      -ngl ${NGL:-99}
+      -fa on
+      -ctk q8_0 -ctv q8_0
+      --host 0.0.0.0 --port 8081
+    ports:
+      - "8081:8081"
+
+  # ==========================================================================
+  # 无投机解码 + GPU — 基线对比
+  # ==========================================================================
+  baseline-gpu:
+    <<: *common
+    <<: *gpu
+    image: ghcr.io/${IMAGE_OWNER:-haol666}/llama-xing4:cuda
+    container_name: llama-xing4-baseline
+    command: >
+      -m /models/${TARGET_MODEL:-Xing4.0-29B-A4B-1Q3M.gguf}
+      -c ${CTX_SIZE:-32768}
+      -ngl ${NGL:-99}
+      -fa on
+      -ctk q8_0 -ctv q8_0
+      --host 0.0.0.0 --port 8082
+    ports:
+      - "8082:8082"

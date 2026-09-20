@@ -1,0 +1,89 @@
+# syntax=docker/dockerfile:1.7
+
+# ==============================================================================
+# Dockerfile for llama.cpp with Xing4.0 (TeleAI XingChen-AGI Xing4.0-29B-A4B)
+# PR #29012: https://github.com/ggml-org/llama.cpp/pull/29012
+# Branch: shuxiaoqiong/llama.cpp:xing4_0-port
+#
+# Architecture: DeepSeek-V3 MLA + DeepSeekMoE (29B total / 4B active)
+#               + mHC (manifold-constrained hyper-connection, 4-stream Sinkhorn)
+#               + DeepSeek-V3 MTP head, SentencePiece tokenizer
+#
+# Build args:
+#   GIT_URL     - git repo to clone      (default: PR #29012 author's fork)
+#   GIT_BRANCH  - branch                 (default: xing4_0-port, tracks PR HEAD)
+#   GGML_CUDA   - CUDA backend ON/OFF    (default: ON)
+#   CUDA_ARCH   - CUDA arch target       (default: 75;80;86;89;90)
+#                  75=2080Ti/T4, 80=A100, 86=3090, 89=4090, 90=H100
+#
+# Build:
+#   docker build -t llama-xing4 -f Dockerfile.cuda .
+#   docker build -t llama-xing4 -f Dockerfile.cuda --build-arg CUDA_ARCH=75 .
+#
+# Run:
+#   docker run --gpus all -p 8080:8080 -v /path/to/models:/models llama-xing4 \
+#     -m /models/Xing4.0-29B-A4B-1Q3M.gguf \
+#     -c 32768 -ngl 99 -fa on -ctk q8_0 -ctv q8_0 \
+#     --host 0.0.0.0 --port 8080
+# ==============================================================================
+
+# ---- Builder stage ----
+ARG BASE_IMAGE=nvidia/cuda:12.9.1-devel-ubuntu24.04
+FROM ${BASE_IMAGE} AS builder
+
+ARG GIT_URL=https://github.com/shuxiaoqiong/llama.cpp.git
+ARG GIT_BRANCH=xing4_0-port
+ARG GGML_CUDA=ON
+ARG CUDA_ARCH=75;80;86;89;90
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        cmake \
+        ninja-build \
+        git \
+        curl \
+        ca-certificates \
+        pkg-config \
+        build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+RUN git clone --depth 1 --branch "${GIT_BRANCH}" "${GIT_URL}" llama.cpp
+
+# Create symlinks to CUDA stubs so linker can find libcuda.so and libcuda.so.1
+# libggml-cuda.so has NEEDED entry for libcuda.so.1, stubs only provide libcuda.so
+RUN ln -sf /usr/local/cuda/lib64/stubs/libcuda.so /usr/local/cuda/lib64/libcuda.so && \
+    ln -sf /usr/local/cuda/lib64/stubs/libcuda.so /usr/local/cuda/lib64/libcuda.so.1
+
+RUN cd llama.cpp && \
+    cmake -B build \
+        -G Ninja \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DGGML_CUDA=${GGML_CUDA} \
+        -DCMAKE_CUDA_ARCHITECTURES=${CUDA_ARCH} \
+        -DLLAMA_CURL=ON \
+        -DLLAMA_BUILD_TESTS=OFF \
+        -DLLAMA_BUILD_EXAMPLES=OFF \
+        -DLLAMA_BUILD_SERVER=ON \
+    && \
+    cmake --build build --config Release -j$(nproc)
+
+# ---- Runtime stage: use runtime image (much smaller than devel) ----
+FROM nvidia/cuda:12.9.1-runtime-ubuntu24.04 AS runtime
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libcurl4 \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /build/llama.cpp/build/bin/llama-server /usr/local/bin/
+COPY --from=builder /build/llama.cpp/build/bin/llama-cli      /usr/local/bin/
+COPY --from=builder /build/llama.cpp/build/bin/llama-bench   /usr/local/bin/
+
+ENV LLAMA_ARG_HOST=0.0.0.0
+ENV LLAMA_ARG_PORT=8080
+
+EXPOSE 8080
+
+ENTRYPOINT ["llama-server"]
+CMD ["--help"]
