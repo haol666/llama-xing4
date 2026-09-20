@@ -10,11 +10,23 @@
 
 GitHub Actions 构建完成后，以下镜像可用：
 
-| 镜像 | 标签 | 说明 | 镜像大小 |
-|------|------|------|---------|
-| `ghcr.io/haol666/llama-xing4:cuda` | 多架构 CUDA | 覆盖 75/80/86/89/90 | ~3.5 GB |
-| `ghcr.io/haol666/llama-xing4:cuda-75` | Turing 专用 | 2080Ti / T4 精简编译 | ~2.5 GB |
-| `ghcr.io/haol666/llama-xing4:cpu` | 纯 CPU | 无 GPU 依赖（29B MoE 很慢，仅冒烟测试） | ~450 MB |
+| 镜像 | 说明 |
+|------|------|
+| `ghcr.io/haol666/llama-xing4:cuda` | CUDA 12.8.1 全架构，基础层与官方 server-cuda 完全一致 |
+| `ghcr.io/haol666/llama-xing4:cuda-75` | CUDA 12.8.1 Turing 专用（2080Ti / T4） |
+| `ghcr.io/haol666/llama-xing4:cpu` | 纯 CPU（29B MoE 很慢，仅冒烟测试） |
+
+## 与官方镜像共享基础层（省磁盘）
+
+本镜像结构完整复刻官方 `.devops/cuda.Dockerfile`（ggml-org/llama.cpp）：
+
+- **基础层共享**：`nvidia/cuda:12.8.1-runtime-ubuntu24.04`（压缩约 2.1 GB）
+  与 `ghcr.io/ggml-org/llama.cpp:server-cuda` 的基础层 digest 完全一致。
+  本地同时保留官方镜像 + 本镜像时，Docker 只存一份基础层，
+  本镜像净增量约 0.2~0.4 GB（Xing4.0 的 .so 后端 + 薄壳二进制）。
+- **GGML_BACKEND_DL=ON**：后端 `.so` 收集在 `/app`，薄壳可执行在 `/app/full`。
+  9 月版 llama.cpp 的可执行文件链接 shared 库，镜像必须携带 `.so` 才能运行。
+- Web UI（tools/ui）随镜像构建，llama-server Web 界面可用。
 
 ## 关于 Xing4.0-29B-A4B
 
@@ -135,7 +147,7 @@ push 到 main ──┬──> build-cuda (75;80;86;89;90) ──> ghcr.io/...:c
 ```
 ghcr.io/haol666/llama-xing4:cuda          ← 最新
 ghcr.io/haol666/llama-xing4:cuda-20260920  ← 日期快照
-ghcr.io/haol666/llama-xing4:cuda-63c16fb   ← 源 commit 前缀
+ghcr.io/haol666/llama-xing4:cuda-79baadf   ← 本仓库 commit SHA
 ```
 
 ## Unraid 部署
@@ -203,6 +215,7 @@ curl http://localhost:8082/v1/chat/completions  # 基线
 | mergeable_state=unstable | PR 的 CI 有红项，若本仓库构建失败请先看 Actions 日志 |
 | 官方镜像不兼容 | 用官方 llama.cpp 加载会报 `unknown model architecture: 'xing4_0'`，必须用本镜像 |
 | CPU 推理无实用价值 | 29B MoE 纯 CPU 极慢（PR 作者原话），cpu 镜像仅冒烟测试 |
+| 早期镜像不可用 | 20260920 上午首次构建的 tag（*-79baadf）只含薄壳二进制缺 .so，已废弃；请用最新 tag |
 | 架构合并后本仓库退役 | PR 合入 master 后官方镜像即可用，本仓库停止每周构建 |
 
 ## 文件结构

@@ -17,12 +17,11 @@ case "$ACTION" in
     # ---- Build GPU image ----
     "build"|"build-gpu")
         echo "[*] Building GPU image: ${IMAGE_NAME}"
-        docker build -t "${IMAGE_NAME}" \
+        docker build --target server -t "${IMAGE_NAME}" \
             -f Dockerfile.cuda \
             --build-arg GIT_URL=https://github.com/shuxiaoqiong/llama.cpp.git \
             --build-arg GIT_BRANCH=xing4_0-port \
-            --build-arg GGML_CUDA=ON \
-            --build-arg CUDA_ARCH="${CUDA_ARCH:-75;80;86;89;90}" \
+            --build-arg CUDA_DOCKER_ARCH="${CUDA_DOCKER_ARCH:-default}" \
             .
         echo "[done] Image built: ${IMAGE_NAME}"
         ;;
@@ -30,7 +29,7 @@ case "$ACTION" in
     # ---- Build CPU-only image ----
     "build-cpu")
         echo "[*] Building CPU image: ${IMAGE_NAME}-cpu"
-        docker build -t "${IMAGE_NAME}-cpu" \
+        docker build --target server -t "${IMAGE_NAME}-cpu" \
             -f Dockerfile.cpu \
             --build-arg GIT_URL=https://github.com/shuxiaoqiong/llama.cpp.git \
             --build-arg GIT_BRANCH=xing4_0-port \
@@ -107,24 +106,29 @@ case "$ACTION" in
 llama.cpp Xing4.0 (PR #29012) build & run script
 
 USAGE:
-  ./build.sh build           Build GPU Docker image (CUDA)
+  ./build.sh build           Build GPU Docker image (CUDA 12.8.1, target=server)
   ./build.sh build-cpu       Build CPU-only Docker image
   ./build.sh run <model> [extra...]        Run llama-server on GPU
   ./build.sh run-mtp <model> [extra...]    Run with built-in MTP spec decoding
   ./build.sh run-cpu <model> [extra...]    Run on CPU (smoke test)
 
 ENVIRONMENT:
-  MODEL_DIR   Host directory with GGUF files (default: ~/models)
-  PORT        Host port mapping (default: 8080)
-  CUDA_ARCH   CUDA arch, e.g. 75 (2080Ti), 89 (4090)
-  SPEC_N_MAX  MTP draft depth (default: 4)
-  CTX_SIZE    Context size (default: 32768; model supports up to 256K)
-  NGL         GPU layers (default: 99)
+  MODEL_DIR       Host directory with GGUF files (default: ~/models)
+  PORT            Host port mapping (default: 8080)
+  CUDA_DOCKER_ARCH  CUDA arch: default (all archs), 75 (2080Ti/T4), 89 (4090)
+  SPEC_N_MAX      MTP draft depth (default: 4)
+  CTX_SIZE        Context size (default: 32768; model supports up to 256K)
+  NGL             GPU layers (default: 99)
 
 XING4.0 MODEL:
   XingChen-AGI/Xing4.0-29B-A4B on HuggingFace / ModelScope
   GGUF must be converted with PR #29012 branch conversion scripts
   (general.architecture = "xing4_0"; official llama.cpp cannot load it)
+
+IMAGE STRUCTURE (mirrors official .devops/cuda.Dockerfile):
+  - CUDA 12.8.1 base layers identical to ghcr.io/ggml-org/llama.cpp:server-cuda
+    => Docker storage shares those layers with the official image locally
+  - GGML_BACKEND_DL=ON: backend .so files in /app, thin binaries in /app/full
 
 KNOWN NOTES:
   - PR #29012 is under review; upstream branch may be force-pushed.

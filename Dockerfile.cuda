@@ -5,20 +5,24 @@
 # PR #29012: https://github.com/ggml-org/llama.cpp/pull/29012
 # Branch: shuxiaoqiong/llama.cpp:xing4_0-port
 #
-# Architecture: DeepSeek-V3 MLA + DeepSeekMoE (29B total / 4B active)
-#               + mHC (manifold-constrained hyper-connection, 4-stream Sinkhorn)
-#               + DeepSeek-V3 MTP head, SentencePiece tokenizer
+# Structure mirrors the official .devops/cuda.Dockerfile (ggml-org/llama.cpp):
+#   - CUDA 12.8.1 base layers identical to ghcr.io/ggml-org/llama.cpp:server-cuda
+#     => local Docker storage SHARES those layers with the official image
+#   - GGML_BACKEND_DL=ON: backends are dynamic .so files collected into /app
+#     (llama.cpp builds thin executables that link shared libs at runtime;
+#      copying only the binaries produces a broken image - the .so are required)
 #
 # Build args:
-#   GIT_URL     - git repo to clone      (default: PR #29012 author's fork)
-#   GIT_BRANCH  - branch                 (default: xing4_0-port, tracks PR HEAD)
-#   GGML_CUDA   - CUDA backend ON/OFF    (default: ON)
-#   CUDA_ARCH   - CUDA arch target       (default: 75;80;86;89;90)
-#                  75=2080Ti/T4, 80=A100, 86=3090, 89=4090, 90=H100
+#   GIT_URL          - source repo   (default: PR #29012 author's fork)
+#   GIT_BRANCH       - source branch (default: xing4_0-port, tracks PR HEAD)
+#   CUDA_DOCKER_ARCH - CUDA arch: default = all supported archs; 75 = 2080Ti/T4
+#
+# Target: `server` (llama-server + llama-cli + llama-bench)
 #
 # Build:
-#   docker build -t llama-xing4 -f Dockerfile.cuda .
-#   docker build -t llama-xing4 -f Dockerfile.cuda --build-arg CUDA_ARCH=75 .
+#   docker build --target server -t llama-xing4 -f Dockerfile.cuda .
+#   docker build --target server -t llama-xing4 -f Dockerfile.cuda \
+#       --build-arg CUDA_DOCKER_ARCH=75 .
 #
 # Run:
 #   docker run --gpus all -p 8080:8080 -v /path/to/models:/models llama-xing4 \
@@ -27,63 +31,91 @@
 #     --host 0.0.0.0 --port 8080
 # ==============================================================================
 
-# ---- Builder stage ----
-ARG BASE_IMAGE=nvidia/cuda:12.9.1-devel-ubuntu24.04
-FROM ${BASE_IMAGE} AS builder
+ARG UBUNTU_VERSION=24.04
+ARG CUDA_VERSION=12.8.1
+ARG GCC_VERSION=14
+ARG BASE_CUDA_DEV_CONTAINER=docker.io/nvidia/cuda:${CUDA_VERSION}-devel-ubuntu${UBUNTU_VERSION}
+ARG BASE_CUDA_RUNTIME_CONTAINER=docker.io/nvidia/cuda:${CUDA_VERSION}-runtime-ubuntu${UBUNTU_VERSION}
+ARG NODE_VERSION=24
+
+# ---- Web UI stage (embedded llama-server webui) ----
+FROM docker.io/node:${NODE_VERSION} AS web
 
 ARG GIT_URL=https://github.com/shuxiaoqiong/llama.cpp.git
 ARG GIT_BRANCH=xing4_0-port
-ARG GGML_CUDA=ON
-ARG CUDA_ARCH=75;80;86;89;90
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        cmake \
-        ninja-build \
         git \
-        curl \
         ca-certificates \
-        pkg-config \
-        build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /build
+RUN git clone --depth 1 --branch "${GIT_BRANCH}" "${GIT_URL}" /app/repo
+
+WORKDIR /app/repo/tools/ui
+
+RUN npm ci
+
+RUN LLAMA_BUILD_NUMBER="xing4-pr29012" npm run build
+
+# ---- Build stage ----
+FROM ${BASE_CUDA_DEV_CONTAINER} AS build
+
+ARG GCC_VERSION=14
+ARG CUDA_DOCKER_ARCH=default
+ARG GIT_URL=https://github.com/shuxiaoqiong/llama.cpp.git
+ARG GIT_BRANCH=xing4_0-port
+
+RUN apt-get update && \
+    apt-get install -y gcc-${GCC_VERSION} g++-${GCC_VERSION} build-essential cmake python3 python3-pip git libssl-dev libgomp1
+
+ENV CC=gcc-${GCC_VERSION} CXX=g++-${GCC_VERSION} CUDAHOSTCXX=g++-${GCC_VERSION}
+
+WORKDIR /app
 
 RUN git clone --depth 1 --branch "${GIT_BRANCH}" "${GIT_URL}" llama.cpp
 
-# Create symlinks to CUDA stubs so linker can find libcuda.so and libcuda.so.1
-# libggml-cuda.so has NEEDED entry for libcuda.so.1, stubs only provide libcuda.so
-RUN ln -sf /usr/local/cuda/lib64/stubs/libcuda.so /usr/local/cuda/lib64/libcuda.so && \
-    ln -sf /usr/local/cuda/lib64/stubs/libcuda.so /usr/local/cuda/lib64/libcuda.so.1
+COPY --from=web /app/repo/tools/ui/dist /app/llama.cpp/tools/ui/dist
 
-RUN cd llama.cpp && \
-    cmake -B build \
-        -G Ninja \
-        -DCMAKE_BUILD_TYPE=Release \
-        -DGGML_CUDA=${GGML_CUDA} \
-        -DCMAKE_CUDA_ARCHITECTURES=${CUDA_ARCH} \
-        -DLLAMA_CURL=ON \
-        -DLLAMA_BUILD_TESTS=OFF \
-        -DLLAMA_BUILD_EXAMPLES=OFF \
-        -DLLAMA_BUILD_SERVER=ON \
-    && \
+RUN if [ "${CUDA_DOCKER_ARCH}" != "default" ]; then \
+    export CMAKE_ARGS="-DCMAKE_CUDA_ARCHITECTURES=${CUDA_DOCKER_ARCH}"; \
+    fi && \
+    cmake -B build -DGGML_NATIVE=OFF -DGGML_CUDA=ON -DGGML_BACKEND_DL=ON -DLLAMA_CURL=ON -DLLAMA_BUILD_TESTS=OFF ${CMAKE_ARGS} -DCMAKE_EXE_LINKER_FLAGS=-Wl,--allow-shlib-undefined /app/llama.cpp && \
     cmake --build build --config Release -j$(nproc)
 
-# ---- Runtime stage: use runtime image (much smaller than devel) ----
-FROM nvidia/cuda:12.9.1-runtime-ubuntu24.04 AS runtime
+RUN mkdir -p /app/lib && \
+    find build -name "*.so*" -exec cp {} /app/lib \;
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        libcurl4 \
-        ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+RUN mkdir -p /app/full && \
+    cp build/bin/llama-server build/bin/llama-cli build/bin/llama-bench /app/full/
 
-COPY --from=builder /build/llama.cpp/build/bin/llama-server /usr/local/bin/
-COPY --from=builder /build/llama.cpp/build/bin/llama-cli      /usr/local/bin/
-COPY --from=builder /build/llama.cpp/build/bin/llama-bench   /usr/local/bin/
+# ---- Base image (apt command mirrors official Dockerfile to share layers) ----
+FROM ${BASE_CUDA_RUNTIME_CONTAINER} AS base
+
+RUN apt-get update \
+    && apt-get install -y libgomp1 curl ffmpeg \
+    && apt autoremove -y \
+    && apt clean -y \
+    && rm -rf /tmp/* /var/tmp/* \
+    && find /var/cache/apt/archives /var/lib/apt/lists -not -name lock -type f -delete \
+    && find /var/cache -type f -delete
+
+COPY --from=build /app/lib/ /app
+
+# ---- Server target ----
+FROM base AS server
 
 ENV LLAMA_ARG_HOST=0.0.0.0
 ENV LLAMA_ARG_PORT=8080
 
+COPY --from=build /app/full/llama-server /app/full/llama-server
+COPY --from=build /app/full/llama-cli      /app/full/llama-cli
+COPY --from=build /app/full/llama-bench   /app/full/llama-bench
+
+WORKDIR /app
+
+HEALTHCHECK CMD [ "curl", "-f", "http://localhost:8080/health" ]
+
 EXPOSE 8080
 
-ENTRYPOINT ["llama-server"]
+ENTRYPOINT [ "/app/full/llama-server" ]
 CMD ["--help"]

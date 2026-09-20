@@ -2,62 +2,100 @@
 
 # ==============================================================================
 # Dockerfile for llama.cpp with Xing4.0 - CPU-only build
-# No CUDA dependency, smaller image for testing/development
+# Mirrors the official .devops/cpu.Dockerfile (ggml-org/llama.cpp):
+#   - GGML_BACKEND_DL=ON + GGML_CPU_ALL_VARIANTS=ON (runtime CPU dispatch)
+#   - .so backends collected into /app (thin executables need shared libs)
 #
 # NOTE: Xing4.0-29B-A4B is a MoE model (29B total, 4B active). CPU-only
 #       inference is slow; this image is mainly for smoke tests / debugging.
 #
 # Build:
-#   docker build -t llama-xing4-cpu -f Dockerfile.cpu .
+#   docker build --target server -t llama-xing4-cpu -f Dockerfile.cpu .
 # ==============================================================================
 
-FROM ubuntu:24.04 AS builder
+ARG UBUNTU_VERSION=24.04
+ARG NODE_VERSION=24
+
+# ---- Web UI stage ----
+FROM docker.io/node:${NODE_VERSION} AS web
 
 ARG GIT_URL=https://github.com/shuxiaoqiong/llama.cpp.git
 ARG GIT_BRANCH=xing4_0-port
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        cmake \
-        ninja-build \
         git \
-        curl \
         ca-certificates \
-        pkg-config \
-        build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /build
+RUN git clone --depth 1 --branch "${GIT_BRANCH}" "${GIT_URL}" /app/repo
+
+WORKDIR /app/repo/tools/ui
+
+RUN npm ci
+
+RUN LLAMA_BUILD_NUMBER="xing4-pr29012" npm run build
+
+# ---- Build stage ----
+FROM docker.io/ubuntu:${UBUNTU_VERSION} AS build
+
+ARG GCC_VERSION=14
+ARG GIT_URL=https://github.com/shuxiaoqiong/llama.cpp.git
+ARG GIT_BRANCH=xing4_0-port
+ARG TARGETARCH
+
+RUN apt-get update && \
+    apt-get install -y gcc-${GCC_VERSION} g++-${GCC_VERSION} build-essential git cmake libssl-dev
+
+ENV CC=gcc-${GCC_VERSION} CXX=g++-${GCC_VERSION}
+
+WORKDIR /app
 
 RUN git clone --depth 1 --branch "${GIT_BRANCH}" "${GIT_URL}" llama.cpp
 
-RUN cd llama.cpp && \
-    cmake -B build \
-        -G Ninja \
-        -DCMAKE_BUILD_TYPE=Release \
-        -DGGML_CUDA=OFF \
-        -DLLAMA_CURL=ON \
-        -DLLAMA_BUILD_TESTS=OFF \
-        -DLLAMA_BUILD_EXAMPLES=OFF \
-        -DLLAMA_BUILD_SERVER=ON \
-    && \
-    cmake --build build --config Release -j$(nproc)
+COPY --from=web /app/repo/tools/ui/dist /app/llama.cpp/tools/ui/dist
 
-# ---- Runtime ----
-FROM ubuntu:24.04 AS runtime
+RUN if [ "${TARGETARCH}" = "amd64" ] || [ "${TARGETARCH}" = "arm64" ]; then \
+        cmake -S /app/llama.cpp -B build -DCMAKE_BUILD_TYPE=Release -DGGML_NATIVE=OFF -DLLAMA_BUILD_TESTS=OFF -DGGML_BACKEND_DL=ON -DGGML_CPU_ALL_VARIANTS=ON; \
+    else \
+        echo "Unsupported architecture"; \
+        exit 1; \
+    fi && \
+    cmake --build build -j $(nproc)
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        libcurl4 \
-        ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+RUN mkdir -p /app/lib && \
+    find build -name "*.so*" -exec cp {} /app/lib \;
 
-COPY --from=builder /build/llama.cpp/build/bin/llama-server /usr/local/bin/
-COPY --from=builder /build/llama.cpp/build/bin/llama-cli      /usr/local/bin/
-COPY --from=builder /build/llama.cpp/build/bin/llama-bench   /usr/local/bin/
+RUN mkdir -p /app/full && \
+    cp build/bin/llama-server build/bin/llama-cli build/bin/llama-bench /app/full/
+
+# ---- Base image ----
+FROM docker.io/ubuntu:${UBUNTU_VERSION} AS base
+
+RUN apt-get update \
+    && apt-get install -y libgomp1 curl ffmpeg \
+    && apt autoremove -y \
+    && apt clean -y \
+    && rm -rf /tmp/* /var/tmp/* \
+    && find /var/cache/apt/archives /var/lib/apt/lists -not -name lock -type f -delete \
+    && find /var/cache -type f -delete
+
+COPY --from=build /app/lib/ /app
+
+# ---- Server target ----
+FROM base AS server
 
 ENV LLAMA_ARG_HOST=0.0.0.0
 ENV LLAMA_ARG_PORT=8080
 
+COPY --from=build /app/full/llama-server /app/full/llama-server
+COPY --from=build /app/full/llama-cli      /app/full/llama-cli
+COPY --from=build /app/full/llama-bench   /app/full/llama-bench
+
+WORKDIR /app
+
+HEALTHCHECK CMD [ "curl", "-f", "http://localhost:8080/health" ]
+
 EXPOSE 8080
 
-ENTRYPOINT ["llama-server"]
+ENTRYPOINT [ "/app/full/llama-server" ]
 CMD ["--help"]

@@ -2,9 +2,13 @@
 # GitHub Actions: Build llama.cpp Xing4.0 (PR #29012) Docker images
 #
 # Outputs 3 images to ghcr.io:
-#   - llama-xing4:cuda       CUDA 12.9, multi-arch (75;80;86;89;90)
-#   - llama-xing4:cuda-75    CUDA 12.9, Turing arch (2080Ti/T4)
+#   - llama-xing4:cuda       CUDA 12.8.1, all supported archs (same as official)
+#   - llama-xing4:cuda-75    CUDA 12.8.1, Turing arch (2080Ti/T4)
 #   - llama-xing4:cpu        CPU-only
+#
+# Structure mirrors the official .devops/cuda.Dockerfile => base layers are
+# SHARED with ghcr.io/ggml-org/llama.cpp:server-cuda (CUDA 12.8.1 runtime):
+# pulling both images locally costs the shared base layers only once.
 #
 # Source: shuxiaoqiong/llama.cpp:xing4_0-port (PR #29012 head branch)
 # NOTE: PR #29012 is still under review. The branch may be force-pushed;
@@ -28,9 +32,9 @@ on:
   workflow_dispatch:
     inputs:
       cuda_arch:
-        description: 'CUDA arch (75=2080Ti, 89=4090, 75;80;86;89;90=multi-arch)'
+        description: 'CUDA_DOCKER_ARCH (default=all archs, 75=2080Ti/T4, 89=4090)'
         required: false
-        default: '75;80;86;89;90'
+        default: 'default'
       push_image:
         description: 'Push image to ghcr.io'
         required: false
@@ -58,8 +62,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - cuda_arch: "75;80;86;89;90"
-            cuda_arch_label: "multi-arch"
+          - cuda_arch: "default"
+            cuda_arch_label: "all-archs"
             tag_suffix: "cuda"
           - cuda_arch: "75"
             cuda_arch_label: "turing-2080Ti"
@@ -102,11 +106,12 @@ jobs:
         with:
           context: .
           file: ./Dockerfile.cuda
+          target: server
           push: ${{ github.event_name != 'pull_request' && (github.event.inputs.push_image != 'false') }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            CUDA_ARCH=${{ matrix.cuda_arch }}
+            CUDA_DOCKER_ARCH=${{ matrix.cuda_arch }}
           no-cache: true
           cache-from: type=gha
           cache-to: type=gha,mode=max
@@ -164,6 +169,7 @@ jobs:
         with:
           context: .
           file: ./Dockerfile.cpu
+          target: server
           push: ${{ github.event_name != 'pull_request' && (github.event.inputs.push_image != 'false') }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
