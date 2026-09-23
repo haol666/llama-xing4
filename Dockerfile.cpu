@@ -54,13 +54,15 @@ RUN git clone --depth 1 --branch "${GIT_BRANCH}" "${GIT_URL}" llama.cpp
 
 COPY --from=web /app/repo/tools/ui/dist /app/llama.cpp/tools/ui/dist
 
+ARG BUILD_JOBS=0
 RUN if [ "${TARGETARCH}" = "amd64" ] || [ "${TARGETARCH}" = "arm64" ]; then \
         cmake -S /app/llama.cpp -B build -DCMAKE_BUILD_TYPE=Release -DGGML_NATIVE=OFF -DLLAMA_BUILD_TESTS=OFF -DGGML_BACKEND_DL=ON -DGGML_CPU_ALL_VARIANTS=ON; \
     else \
         echo "Unsupported architecture"; \
         exit 1; \
     fi && \
-    cmake --build build -j $(nproc)
+    if [ "${BUILD_JOBS}" = "0" ]; then JOBS="$(nproc)"; else JOBS="${BUILD_JOBS}"; fi && \
+    cmake --build build -j "${JOBS}"
 
 RUN mkdir -p /app/lib && \
     find build -name "*.so*" -exec cp {} /app/lib \;

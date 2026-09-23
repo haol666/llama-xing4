@@ -1,14 +1,15 @@
 # ==============================================================================
 # GitHub Actions: Build llama.cpp Xing4.0 (PR #29012) Docker images
 #
-# Outputs 3 images to ghcr.io:
-#   - llama-xing4:cuda       CUDA 12.8.1, all supported archs (same as official)
-#   - llama-xing4:cuda-75    CUDA 12.8.1, Turing arch (2080Ti/T4)
-#   - llama-xing4:cpu        CPU-only
+# Outputs to ghcr.io:
+#   - llama-xing4:cpu         CPU, multi-arch (amd64 + arm64)          <- universal
+#   - llama-xing4:cuda        CUDA 12.8.1 amd64 (all archs)
+#   - llama-xing4:cuda-75     CUDA 12.8.1 Turing (2080Ti/T4)
+#   - llama-xing4:cuda13      CUDA 13.4.1 amd64  (matches official cuda13)
+#   - llama-xing4:cuda13-arm64 CUDA 13.4.1 arm64 (Grace-Blackwell/DGX Spark, sm_100f)
 #
-# Structure mirrors the official .devops/cuda.Dockerfile => base layers are
-# SHARED with ghcr.io/ggml-org/llama.cpp:server-cuda (CUDA 12.8.1 runtime):
-# pulling both images locally costs the shared base layers only once.
+# CUDA 13.4.1 matches the official llama.cpp `cuda13` tag (upstream docker.yml),
+# so the nvidia/cuda:13.4.1 base layers are SHARED with the official cuda13 image.
 #
 # Source: shuxiaoqiong/llama.cpp:xing4_0-port (PR #29012 head branch)
 # NOTE: PR #29012 is still under review. The branch may be force-pushed;
@@ -31,10 +32,6 @@ on:
       - '.github/workflows/build-xing4.yml'
   workflow_dispatch:
     inputs:
-      cuda_arch:
-        description: 'CUDA_DOCKER_ARCH (default=all archs, 75=2080Ti/T4, 89=4090)'
-        required: false
-        default: 'default'
       push_image:
         description: 'Push image to ghcr.io'
         required: false
@@ -53,10 +50,76 @@ env:
 
 jobs:
   # ==========================================================================
-  # Job 1: CUDA images (multi-arch + turing, parallel)
+  # JOB 0: CPU-only, multi-arch (amd64 + arm64) via buildx
+  #   CPU has no GPU-driver dependency, so QEMU cross-arch build works.
+  #   Output: :cpu (index manifest with both architectures)
+  # ==========================================================================
+  build-cpu:
+    name: CPU (amd64+arm64)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Lowercase repo name for image
+        id: repo
+        run: echo "name=${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ steps.repo.outputs.name }}
+          tags: |
+            type=raw,value=cpu
+            type=raw,value=cpu-{{date 'YYYYMMDD'}}
+            type=sha,prefix=cpu-
+
+      - name: Build & push CPU image (amd64 + arm64)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile.cpu
+          target: server
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' && (github.event.inputs.push_image != 'false') }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "### CPU Build (amd64+arm64)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- Tags: \`${{ steps.meta.outputs.tags }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- Status: ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
+
+  # ==========================================================================
+  # JOB 1: CUDA 12.8.1 (legacy stable), amd64 only
+  #   multi-arch all-archs + Turing-2080Ti special, parallel
   # ==========================================================================
   build-cuda:
-    name: CUDA (${{ matrix.cuda_arch_label }})
+    name: CUDA12 (${{ matrix.cuda_arch_label }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -101,16 +164,18 @@ jobs:
             type=raw,value=${{ matrix.tag_suffix }}-{{date 'YYYYMMDD'}}
             type=sha,prefix=${{ matrix.tag_suffix }}-
 
-      - name: Build & push CUDA image
+      - name: Build & push CUDA12 image (amd64)
         uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Dockerfile.cuda
           target: server
+          platforms: linux/amd64
           push: ${{ github.event_name != 'pull_request' && (github.event.inputs.push_image != 'false') }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
+            CUDA_VERSION=12.8.1
             CUDA_DOCKER_ARCH=${{ matrix.cuda_arch }}
           no-cache: true
           cache-from: type=gha
@@ -119,17 +184,18 @@ jobs:
       - name: Summary
         if: always()
         run: |
-          echo "### CUDA Build: ${{ matrix.cuda_arch_label }}" >> $GITHUB_STEP_SUMMARY
+          echo "### CUDA12 Build: ${{ matrix.cuda_arch_label }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "- Architecture: \`${{ matrix.cuda_arch }}\`" >> $GITHUB_STEP_SUMMARY
           echo "- Tags: \`${{ steps.meta.outputs.tags }}\`" >> $GITHUB_STEP_SUMMARY
           echo "- Status: ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
 
   # ==========================================================================
-  # Job 2: CPU-only image
+  # JOB 2: CUDA 13.4.1 amd64 (matches official llama.cpp `cuda13` version)
+  #   Amd64 native on x64 runner. Shared base layers with official cuda13.
   # ==========================================================================
-  build-cpu:
-    name: CPU-only
+  build-cuda13:
+    name: CUDA13 amd64
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -160,26 +226,102 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ steps.repo.outputs.name }}
           tags: |
-            type=raw,value=cpu
-            type=raw,value=cpu-{{date 'YYYYMMDD'}}
-            type=sha,prefix=cpu-
+            type=raw,value=cuda13
+            type=raw,value=cuda13-{{date 'YYYYMMDD'}}
+            type=sha,prefix=cuda13-
 
-      - name: Build & push CPU image
+      - name: Build & push CUDA13 image (amd64)
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: ./Dockerfile.cpu
+          file: ./Dockerfile.cuda
           target: server
+          platforms: linux/amd64
           push: ${{ github.event_name != 'pull_request' && (github.event.inputs.push_image != 'false') }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            CUDA_VERSION=13.4.1
+            CUDA_DOCKER_ARCH=default
+            BUILD_JOBS=8
+          no-cache: true
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
       - name: Summary
         if: always()
         run: |
-          echo "### CPU Build" >> $GITHUB_STEP_SUMMARY
+          echo "### CUDA13 Build (amd64)" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- CUDA 13.4.1 (matches official cuda13)" >> $GITHUB_STEP_SUMMARY
+          echo "- Tags: \`${{ steps.meta.outputs.tags }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- Status: ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
+
+  # ==========================================================================
+  # JOB 3: CUDA 13.4.1 arm64 (Grace-Blackwell / DGX Spark, sm_100f)
+  #   MUST run on an arm64 native runner - nvcc cannot be QEMU-simulated.
+  #   GitHub hosted arm64 runner: ubuntu-24.04-arm (public repo OK)
+  #   CUDA_DOCKER_ARCH=100f => Blackwell (GB10 Grace-Blackwell)
+  # ==========================================================================
+  build-cuda13-arm64:
+    name: CUDA13 arm64 (DGX Spark)
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Lowercase repo name for image
+        id: repo
+        run: echo "name=${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ steps.repo.outputs.name }}
+          tags: |
+            type=raw,value=cuda13-arm64
+            type=raw,value=cuda13-arm64-{{date 'YYYYMMDD'}}
+            type=sha,prefix=cuda13-arm64-
+
+      - name: Build & push CUDA13 image (arm64, Blackwell)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile.cuda
+          target: server
+          platforms: linux/arm64
+          push: ${{ github.event_name != 'pull_request' && (github.event.inputs.push_image != 'false') }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            CUDA_VERSION=13.4.1
+            CUDA_DOCKER_ARCH=100f
+            BUILD_JOBS=8
+          no-cache: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "### CUDA13 Build (arm64, DGX Spark / Grace-Blackwell)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- CUDA 13.4.1, arch sm_100f (Blackwell)" >> $GITHUB_STEP_SUMMARY
           echo "- Tags: \`${{ steps.meta.outputs.tags }}\`" >> $GITHUB_STEP_SUMMARY
           echo "- Status: ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
