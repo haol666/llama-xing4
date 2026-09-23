@@ -6,7 +6,7 @@
 #   - llama-xing4:cuda        CUDA 12.8.1 amd64 (all archs)
 #   - llama-xing4:cuda-75     CUDA 12.8.1 Turing (2080Ti/T4)
 #   - llama-xing4:cuda13      CUDA 13.4.1 amd64  (matches official cuda13)
-#   - llama-xing4:cuda13-arm64 CUDA 13.4.1 arm64 (Grace-Blackwell/DGX Spark, sm_100f)
+#   - llama-xing4:cuda13-arm64 CUDA 13.4.1 arm64 (Grace-Blackwell/DGX Spark, sm_100)
 #
 # CUDA 13.4.1 matches the official llama.cpp `cuda13` tag (upstream docker.yml),
 # so the nvidia/cuda:13.4.1 base layers are SHARED with the official cuda13 image.
@@ -258,10 +258,10 @@ jobs:
           echo "- Status: ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
 
   # ==========================================================================
-  # JOB 3: CUDA 13.4.1 arm64 (Grace-Blackwell / DGX Spark, sm_100f)
+  # JOB 3: CUDA 13.4.1 arm64 (Grace-Blackwell / DGX Spark, sm_100)
   #   MUST run on an arm64 native runner - nvcc cannot be QEMU-simulated.
   #   GitHub hosted arm64 runner: ubuntu-24.04-arm (public repo OK)
-  #   CUDA_DOCKER_ARCH=100f => Blackwell (GB10 Grace-Blackwell)
+  #   CUDA_DOCKER_ARCH=100-real => Blackwell (GB10 Grace-Blackwell)
   # ==========================================================================
   build-cuda13-arm64:
     name: CUDA13 arm64 (DGX Spark)
@@ -311,7 +311,7 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             CUDA_VERSION=13.4.1
-            CUDA_DOCKER_ARCH=100f
+            CUDA_DOCKER_ARCH=100-real
             BUILD_JOBS=8
           no-cache: true
           cache-from: type=gha
@@ -322,6 +322,6 @@ jobs:
         run: |
           echo "### CUDA13 Build (arm64, DGX Spark / Grace-Blackwell)" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "- CUDA 13.4.1, arch sm_100f (Blackwell)" >> $GITHUB_STEP_SUMMARY
+          echo "- CUDA 13.4.1, arch sm_100 (Blackwell/GB10)" >> $GITHUB_STEP_SUMMARY
           echo "- Tags: \`${{ steps.meta.outputs.tags }}\`" >> $GITHUB_STEP_SUMMARY
           echo "- Status: ${{ job.status }}" >> $GITHUB_STEP_SUMMARY

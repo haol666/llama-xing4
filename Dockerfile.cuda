@@ -79,7 +79,7 @@ COPY --from=web /app/repo/tools/ui/dist /app/llama.cpp/tools/ui/dist
 
 ARG TARGETARCH
 RUN if [ "${CUDA_DOCKER_ARCH}" = "default" ] && [ "${TARGETARCH}" = "arm64" ]; then \
-        CUDA_DOCKER_ARCH=100f; export CMAKE_ARGS="-DCMAKE_CUDA_ARCHITECTURES=${CUDA_DOCKER_ARCH}"; \
+        CUDA_DOCKER_ARCH=100-real; export CMAKE_ARGS="-DCMAKE_CUDA_ARCHITECTURES=${CUDA_DOCKER_ARCH}"; \
     elif [ "${CUDA_DOCKER_ARCH}" != "default" ]; then \
         export CMAKE_ARGS="-DCMAKE_CUDA_ARCHITECTURES=${CUDA_DOCKER_ARCH}"; \
     fi && \
